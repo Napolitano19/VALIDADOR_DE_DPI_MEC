@@ -1,0 +1,8 @@
+BIBLIOTECAS UTILIZADAS
+
+pywebview
+PyMuPDF
+Pillow
+pytesseract
+reportlab
+pyinstaller

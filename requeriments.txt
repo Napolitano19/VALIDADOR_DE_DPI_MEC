@@ -1,5 +1,3 @@
-BIBLIOTECAS UTILIZADAS
-
 pywebview
 PyMuPDF
 Pillow

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Validador MEC</title>
+  <style>
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { margin: 0; padding: 24px; background: #f8fafc; color: #1e293b; }
+    .container { max-width: 1060px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; color: #0f172a; }
+    p.sub { color: #64748b; font-size: 0.9rem; margin-top: 0; margin-bottom: 24px; }
+    
+    .card { background: #fff; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .controls { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+    label { font-size: 0.85rem; font-weight: 600; color: #475569; }
+    input[type="number"] { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; width: 100px; font-size: 0.9rem; margin-top: 4px; }
+    
+    .checkbox-group { display: flex; align-items: center; gap: 8px; margin-top: 18px; cursor: pointer; }
+    .checkbox-group input { width: 16px; height: 16px; cursor: pointer; }
+
+    .btn { background: #2563eb; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9rem; transition: background 0.2s; }
+    .btn:hover { background: #1d4ed8; }
+    .btn-secondary { background: #059669; }
+    .btn-secondary:hover { background: #047857; }
+    .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+    
+    .table-container { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
+    th { background: #f1f5f9; padding: 12px; font-size: 0.8rem; text-transform: uppercase; color: #475569; border-bottom: 1px solid #e2e8f0; }
+    td { padding: 12px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; display: inline-block; }
+    .badge-success { background: #dcfce7; color: #15803d; }
+    .badge-danger { background: #fee2e2; color: #b91c1c; }
+    .badge-gray { background: #f1f5f9; color: #475569; }
+    .badge-blue { background: #dbeafe; color: #1e40af; }
+
+    .erros-list { font-size: 0.8rem; color: #dc2626; margin: 6px 0 0 0; padding-left: 16px; line-height: 1.3; }
+    .doc-type { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Validador de Documentos MEC</h1>
+    <p class="sub">Verificação automatizada de resolução (DPI), padrão PDF/A, OCR, marcas d'água e orientação (Decreto 10.278/2020).</p>
+
+    <div class="card controls">
+      <div>
+        <label for="dpiInput">DPI Mínimo Exigido:</label><br>
+        <input type="number" id="dpiInput" value="300" min="72" max="1200">
+      </div>
+
+      <div class="checkbox-group">
+        <input type="checkbox" id="pdfaCheck">
+        <label for="pdfaCheck" style="cursor: pointer;">Exigir padrão PDF/A</label>
+      </div>
+
+      <div style="margin-left: auto; display: flex; gap: 10px;">
+        <button class="btn" onclick="selecionarEValidar()">Selecionar Documentos PDF</button>
+        <button id="btnLaudo" class="btn btn-secondary" onclick="exportarLaudo()" disabled>📄 Exportar Laudo em PDF</button>
+      </div>
+    </div>
+
+    <div class="card table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Arquivo / Tipo OCR</th>
+            <th>Páginas</th>
+            <th>DPI Efetivo</th>
+            <th>PDF/A</th>
+            <th>Modo de Cor</th>
+            <th>Resultado</th>
+          </tr>
+        </thead>
+        <tbody id="resultadoTabela">
+          <tr>
+            <td colspan="6" style="text-align: center; color: #94a3b8; padding: 24px;">
+              Nenhum documento analisado ainda. Clique em "Selecionar Documentos PDF".
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    let ultimosResultados = [];
+
+    async function selecionarEValidar() {
+      const dpiMinimo = parseInt(document.getElementById('dpiInput').value) || 300;
+      const exigirPdfa = document.getElementById('pdfaCheck').checked;
+      const tabela = document.getElementById('resultadoTabela');
+      const btnLaudo = document.getElementById('btnLaudo');
+
+      const arquivos = await pywebview.api.selecionar_arquivos();
+      if (!arquivos || arquivos.length === 0) return;
+
+      tabela.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px;">Lendo e analisando documento(s) com OCR e checagens legais... Aguarde.</td></tr>';
+      
+      ultimosResultados = [];
+      let htmlRows = '';
+
+      for (const caminho of arquivos) {
+        const res = await pywebview.api.validar_pdf(caminho, dpiMinimo, exigirPdfa);
+        ultimosResultados.push(res);
+
+        const badgeStatus = res.aprovado 
+          ? '<span class="badge badge-success">APROVADO</span>' 
+          : '<span class="badge badge-danger">REPROVADO</span>';
+
+        const badgePdfa = res.pdfa 
+          ? '<span class="badge badge-success">Sim</span>' 
+          : '<span class="badge badge-gray">Não</span>';
+
+        const badgeCor = res.colorido 
+          ? '<span class="badge badge-blue">Colorido</span>' 
+          : '<span class="badge badge-gray">P&B / Cinza</span>';
+
+        let detalhesErros = '';
+        if (res.erros && res.erros.length > 0) {
+          detalhesErros = `<ul class="erros-list">${res.erros.map(e => `<li>${e}</li>`).join('')}</ul>`;
+        }
+
+        htmlRows += `
+          <tr>
+            <td>
+              <strong>${res.nome}</strong>
+              <div class="doc-type">🏷️ Identificado: <strong>${res.tipo_doc}</strong></div>
+              ${detalhesErros}
+            </td>
+            <td>${res.paginas}</td>
+            <td><strong>${res.dpi}</strong> DPI</td>
+            <td>${badgePdfa}</td>
+            <td>${badgeCor}</td>
+            <td>${badgeStatus}</td>
+          </tr>
+        `;
+      }
+
+      tabela.innerHTML = htmlRows;
+      btnLaudo.disabled = false;
+    }
+
+    async function exportarLaudo() {
+      if (ultimosResultados.length === 0) return;
+      const gerado = await pywebview.api.gerar_laudo_pdf(ultimosResultados);
+      if (gerado) {
+        alert("Laudo de Conformidade MEC gerado com sucesso!");
+      }
+    }
+  </script>
+</body>
+</html>

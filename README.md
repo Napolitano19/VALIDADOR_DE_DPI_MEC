@@ -52,3 +52,10 @@ pyinstaller --noconfirm --onedir --windowed ^
   --name "Validador_MEC" ^
   validador_dpi.py
 ```
+
+## 🧪 Validação do Ambiente
+
+Para confirmar se todas as bibliotecas e o Tesseract OCR foram configurados corretamente no novo PC, execute o script de diagnóstico:
+
+```bash
+python test_environment.py

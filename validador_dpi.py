@@ -301,11 +301,18 @@ class ValidadorAPI:
             story = []
             styles = getSampleStyleSheet()
 
-            title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1a365d'), spaceAfter=6)
-            sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#4a5568'), spaceAfter=12)
-            cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=8, leading=10)
-            cell_bold = ParagraphStyle('CellBold', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold")
-            error_style = ParagraphStyle('ErrorStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.HexColor('#c53030'))
+            # Paleta de Cores Institucional Unicesusc
+            COR_BORDO = colors.HexColor("#4A1525")
+            COR_VERMELHO = colors.HexColor("#D33833")
+            COR_TEXTO = colors.HexColor("#2D3748")
+            COR_FUNDO_ALT = colors.HexColor("#F9F5F6")
+
+            title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=COR_BORDO, spaceAfter=6)
+            sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=9, textColor=COR_TEXTO, spaceAfter=12)
+            cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=COR_TEXTO)
+            cell_bold = ParagraphStyle('CellBold', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold", textColor=COR_TEXTO)
+            cell_header = ParagraphStyle('CellHeader', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold", textColor=colors.white)
+            error_style = ParagraphStyle('ErrorStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=COR_VERMELHO)
 
             data_hora = datetime.datetime.now().strftime("%d/%m/%Y às %H:%M:%S")
             story.append(Paragraph("LAUDO TÉCNICO DE CONFORMIDADE REGULATÓRIA - MEC", title_style))
@@ -317,11 +324,11 @@ class ValidadorAPI:
 
             summary_data = [
                 [Paragraph("<b>TOTAL ANALISADO</b>", cell_bold), Paragraph("<b>APROVADOS</b>", cell_bold), Paragraph("<b>REPROVADOS</b>", cell_bold)],
-                [Paragraph(str(total), cell_bold), Paragraph(f"<font color='#2f855a'>{aprovados}</font>", cell_bold), Paragraph(f"<font color='#c53030'>{reprovados}</font>", cell_bold)]
+                [Paragraph(str(total), cell_bold), Paragraph(f"<font color='#2f855a'>{aprovados}</font>", cell_bold), Paragraph(f"<font color='#D33833'>{reprovados}</font>", cell_bold)]
             ]
             t_summary = Table(summary_data, colWidths=[180, 180, 180])
             t_summary.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#edf2f7')),
+                ('BACKGROUND', (0, 0), (-1, 0), COR_FUNDO_ALT),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e0')),
                 ('PADDING', (0, 0), (-1, -1), 6),
@@ -330,15 +337,15 @@ class ValidadorAPI:
             story.append(Spacer(1, 12))
 
             table_data = [[
-                Paragraph("<b>Documento / Tipo</b>", cell_bold),
-                Paragraph("<b>DPI</b>", cell_bold),
-                Paragraph("<b>Cor</b>", cell_bold),
-                Paragraph("<b>Resultado</b>", cell_bold),
-                Paragraph("<b>Parecer Técnico & Enquadramento Legal</b>", cell_bold)
+                Paragraph("Documento / Tipo", cell_header),
+                Paragraph("DPI", cell_header),
+                Paragraph("Cor", cell_header),
+                Paragraph("Resultado", cell_header),
+                Paragraph("Parecer Técnico & Enquadramento Legal", cell_header)
             ]]
 
             for r in resultados:
-                status_txt = "<font color='#2f855a'><b>APROVADO</b></font>" if r['aprovado'] else "<font color='#c53030'><b>REPROVADO</b></font>"
+                status_txt = "<font color='#2f855a'><b>APROVADO</b></font>" if r['aprovado'] else "<font color='#D33833'><b>REPROVADO</b></font>"
                 cor_txt = "Colorido" if r['colorido'] else "P&B / Cinza"
                 detalhe_parecer = "<font color='#2f855a'>Conforme padrões técnicos de fidelidade e integridade.</font>"
                 if r['erros']:
@@ -355,13 +362,23 @@ class ValidadorAPI:
                 ])
 
             t_details = Table(table_data, colWidths=[130, 40, 55, 65, 250])
-            t_details.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2b6cb0')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+            
+            # Estilização da Tabela do Laudo com a paleta Unicesusc
+            estilo_tabela = [
+                ('BACKGROUND', (0, 0), (-1, 0), COR_BORDO),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('PADDING', (0, 0), (-1, -1), 5),
-            ]))
+                ('ALIGN', (1, 1), (2, -1), 'CENTER'),
+                ('ALIGN', (3, 1), (3, -1), 'CENTER'),
+            ]
+
+            # Fundo alternado suave nas linhas da tabela
+            for i in range(1, len(table_data)):
+                if i % 2 == 0:
+                    estilo_tabela.append(('BACKGROUND', (0, i), (-1, i), COR_FUNDO_ALT))
+
+            t_details.setStyle(TableStyle(estilo_tabela))
             story.append(t_details)
 
             doc.build(story)

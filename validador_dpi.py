@@ -46,6 +46,11 @@ def remover_acentos(texto):
 
 # Mapeamento de Regras do MEC por Tipo de Documento
 REGRAS_DOCUMENTOS = {
+    "VACINA_RUBEOLA": {
+        "rotulo": "Comprovante / Carteira de Vacinação de Rubéola",
+        "keywords": ["RUBÉOLA", "RUBEOLA", "VACINA", "VACINACAO", "VACINAÇÃO", "IMUNIZACAO", "IMUNIZAÇÃO", "CARTEIRA DE VACINACAO", "TRÍPLICE VIRAL"],
+        "exige_cor": True
+    },
     "QUITACAO_ELEITORAL": {
         "rotulo": "Quitação Eleitoral",
         "keywords": ["QUITACAO ELEITORAL", "CERTIDAO DE QUITACAO", "JUSTICA ELEITORAL", "TRIBUNAL SUPERIOR ELEITORAL", "QUITACAO"],

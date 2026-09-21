@@ -1,5 +1,6 @@
-import sys
 import os
+import sys
+import subprocess
 
 def testar_ambiente():
     print("=" * 60)
@@ -17,7 +18,7 @@ def testar_ambiente():
         "reportlab": "reportlab (Geração de Laudo PDF)"
     }
 
-    print("\n[1/3] Testando bibliotecas do Python...")
+    print("\n[1/4] Testando bibliotecas do Python...")
     for mod, nome in pacotes.items():
         try:
             __import__(mod)
@@ -27,12 +28,10 @@ def testar_ambiente():
             erros += 1
 
     # 2. Teste de Acesso ao Tesseract OCR
-    print("\n[2/3] Testando integração com o Tesseract OCR...")
+    print("\n[2/4] Testando integração com o Tesseract OCR...")
     try:
         import pytesseract
-        from PIL import Image
 
-        # Busca caminho embutido ou do sistema
         base_path = os.path.dirname(os.path.abspath(__file__))
         caminho_local = os.path.join(base_path, 'Tesseract-OCR', 'tesseract.exe')
         caminho_sistema = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -44,16 +43,14 @@ def testar_ambiente():
             pytesseract.pytesseract.tesseract_cmd = caminho_sistema
             print(f"  ℹ️ Tesseract do sistema encontrado em: {caminho_sistema}")
 
-        # Executa comando de versão
         versao = pytesseract.get_tesseract_version()
         print(f"  ✅ Motor Tesseract ativo (Versão {versao})")
     except Exception as e:
         print(f"  ❌ Falha no Tesseract OCR: {str(e)}")
-        print("     -> Verifique se a pasta Tesseract-OCR existe ou se instalou no caminho padrão.")
         erros += 1
 
     # 3. Teste do PyMuPDF (fitz)
-    print("\n[3/3] Testando engine de PDFs (PyMuPDF)...")
+    print("\n[3/4] Testando engine de PDFs (PyMuPDF)...")
     try:
         import fitz
         doc = fitz.open()
@@ -64,13 +61,26 @@ def testar_ambiente():
         print(f"  ❌ Falha na engine de PDF: {str(e)}")
         erros += 1
 
+    # 4. Teste do ExifTool
+    print("\n[4/4] Testando utilitário de Metadados (ExifTool)...")
+    exif_path = os.path.join(os.getcwd(), "ExifTool", "exiftool.exe")
+    if os.path.exists(exif_path):
+        try:
+            res = subprocess.run([exif_path, "-ver"], capture_output=True, text=True, check=True)
+            print(f"  ✅ ExifTool encontrado (Versão {res.stdout.strip()})")
+        except Exception as e:
+            print(f"  ⚠️ ExifTool localizado, mas falhou ao executar: {e}")
+            erros += 1
+    else:
+        print("  ⚠️ ExifTool não localizado na pasta 'ExifTool/'")
+        erros += 1
+
     # Resultado Final
     print("\n" + "=" * 60)
     if erros == 0:
         print("🚀 TUDO CERTO! O ambiente está pronto para rodar a aplicação.")
     else:
-        print(f"⚠️ ATENÇÃO: Foram encontrados {erros} problema(s). Instale as dependências com:")
-        print("   pip install -r requirements.txt")
+        print(f"⚠️ ATENÇÃO: Foram encontrados {erros} problema(s). Verifique as pendências acima.")
     print("=" * 60)
 
 if __name__ == "__main__":

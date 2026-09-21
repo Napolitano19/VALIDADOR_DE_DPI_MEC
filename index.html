@@ -29,21 +29,23 @@
     th { background: #f1f5f9; padding: 12px; font-size: 0.8rem; text-transform: uppercase; color: #475569; border-bottom: 1px solid #e2e8f0; }
     td { padding: 12px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
     
-    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; display: inline-block; }
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; display: inline-block; margin-right: 4px; }
     .badge-success { background: #dcfce7; color: #15803d; }
     .badge-danger { background: #fee2e2; color: #b91c1c; }
     .badge-gray { background: #f1f5f9; color: #475569; }
     .badge-blue { background: #dbeafe; color: #1e40af; }
+    .badge-purple { background: #f3e8ff; color: #6b21a8; }
+    .badge-orange { background: #ffedd5; color: #c2410c; }
 
     .erros-list { font-size: 0.8rem; color: #dc2626; margin: 6px 0 0 0; padding-left: 16px; line-height: 1.3; }
-    .doc-type { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
+    .doc-type { font-size: 0.78rem; color: #64748b; margin-top: 4px; }
   </style>
 </head>
 <body>
 
   <div class="container">
     <h1>Validador de Documentos MEC</h1>
-    <p class="sub">Verificação automatizada de resolução (DPI), padrão PDF/A, OCR, marcas d'água e orientação (Decreto 10.278/2020).</p>
+    <p class="sub">Verificação automatizada de resolução (DPI), padrão PDF/A, OCR, marcas d'água, auditoria de metadados e origem (Decreto 10.278/2020).</p>
 
     <div class="card controls">
       <div>
@@ -56,6 +58,11 @@
         <label for="pdfaCheck" style="cursor: pointer;">Exigir padrão PDF/A</label>
       </div>
 
+      <div class="checkbox-group">
+        <input type="checkbox" id="metadadosCheck">
+        <label for="metadadosCheck" style="cursor: pointer;">Auditar Metadados (Softwares Gráficos)</label>
+      </div>
+
       <div style="margin-left: auto; display: flex; gap: 10px;">
         <button class="btn" onclick="selecionarEValidar()">Selecionar Documentos PDF</button>
         <button id="btnLaudo" class="btn btn-secondary" onclick="exportarLaudo()" disabled>📄 Exportar Laudo em PDF</button>
@@ -66,7 +73,7 @@
       <table>
         <thead>
           <tr>
-            <th>Arquivo / Tipo OCR</th>
+            <th>Arquivo / Origem / Tipo</th>
             <th>Páginas</th>
             <th>DPI Efetivo</th>
             <th>PDF/A</th>
@@ -89,49 +96,67 @@
     let ultimosResultados = [];
 
     async function selecionarEValidar() {
-      const dpiMinimo = parseInt(document.getElementById('dpiInput').value) || 300;
-      const exigirPdfa = document.getElementById('pdfaCheck').checked;
+      // Captura dos elementos e configurações da interface
+      const dpiMinimo = parseInt(document.getElementById('dpiInput')?.value) || 300;
+      const exigirPdfa = document.getElementById('pdfaCheck') ? document.getElementById('pdfaCheck').checked : false;
+      const auditarMetadados = document.getElementById('metadadosCheck') ? document.getElementById('metadadosCheck').checked : false;
+      
       const tabela = document.getElementById('resultadoTabela');
       const btnLaudo = document.getElementById('btnLaudo');
 
+      // 1. Seleção dos ficheiros PDF através do PyWebView
       const arquivos = await pywebview.api.selecionar_arquivos();
       if (!arquivos || arquivos.length === 0) return;
 
+      // 2. Feedback visual durante o processamento
       tabela.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px;">Lendo e analisando documento(s) com OCR e checagens legais... Aguarde.</td></tr>';
       
-      ultimosResultados = [];
+      // 3. Chamada da API Python enviando os parâmetros de validação
+      ultimosResultados = await pywebview.api.analisar_documentos(arquivos, auditarMetadados, exigirPdfa, dpiMinimo);
+      
+      if (!ultimosResultados || ultimosResultados.length === 0) {
+        tabela.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px;">Nenhum resultado retornado.</td></tr>';
+        return;
+      }
+
       let htmlRows = '';
 
-      for (const caminho of arquivos) {
-        const res = await pywebview.api.validar_pdf(caminho, dpiMinimo, exigirPdfa);
-        ultimosResultados.push(res);
-
+      // 4. Construção das linhas alinhadas com as 6 colunas do cabeçalho
+      for (const res of ultimosResultados) {
         const badgeStatus = res.aprovado 
           ? '<span class="badge badge-success">APROVADO</span>' 
           : '<span class="badge badge-danger">REPROVADO</span>';
-
-        const badgePdfa = res.pdfa 
-          ? '<span class="badge badge-success">Sim</span>' 
-          : '<span class="badge badge-gray">Não</span>';
 
         const badgeCor = res.colorido 
           ? '<span class="badge badge-blue">Colorido</span>' 
           : '<span class="badge badge-gray">P&B / Cinza</span>';
 
+        const badgeOrigem = res.origem === 'Nato-Digital'
+          ? '<span class="badge badge-purple">Nato-Digital</span>'
+          : '<span class="badge badge-orange">Escaneado</span>';
+
+        const badgePdfa = res.pdfa 
+          ? '<span class="badge badge-success">Sim</span>' 
+          : '<span class="badge badge-gray">Não</span>';
+
         let detalhesErros = '';
         if (res.erros && res.erros.length > 0) {
-          detalhesErros = `<ul class="erros-list">${res.erros.map(e => `<li>${e}</li>`).join('')}</ul>`;
+          detalhesErros = `<ul class="erros-list" style="margin-top:5px; color:#D33833;">${res.erros.map(e => `<li>${e}</li>`).join('')}</ul>`;
         }
+
+        const dpiTexto = res.dpi === "Nativo (Vetor)" ? res.dpi : `${res.dpi} DPI`;
+        const totalPaginas = res.paginas || 1;
 
         htmlRows += `
           <tr>
             <td>
-              <strong>${res.nome}</strong>
-              <div class="doc-type">🏷️ Identificado: <strong>${res.tipo_doc}</strong></div>
+              <strong>${res.nome}</strong><br>
+              ${badgeOrigem}
+              <span class="doc-type">🏷️ <strong>${res.tipo_doc}</strong></span>
               ${detalhesErros}
             </td>
-            <td>${res.paginas}</td>
-            <td><strong>${res.dpi}</strong> DPI</td>
+            <td>${totalPaginas}</td>
+            <td><strong>${dpiTexto}</strong></td>
             <td>${badgePdfa}</td>
             <td>${badgeCor}</td>
             <td>${badgeStatus}</td>
@@ -139,17 +164,26 @@
         `;
       }
 
+      // Renderiza a estrutura montada na tabela HTML
       tabela.innerHTML = htmlRows;
-      btnLaudo.disabled = false;
+
+      // Habilita o botão de exportação do laudo técnico
+      if (btnLaudo) {
+        btnLaudo.disabled = false;
+      }
     }
 
     async function exportarLaudo() {
-      if (ultimosResultados.length === 0) return;
+      if (!ultimosResultados || ultimosResultados.length === 0) {
+        alert("Nenhum resultado disponível para gerar o laudo.");
+        return;
+      }
+      
       const gerado = await pywebview.api.gerar_laudo_pdf(ultimosResultados);
       if (gerado) {
         alert("Laudo de Conformidade MEC gerado com sucesso!");
       }
     }
-  </script>
+</script>
 </body>
 </html>

@@ -1,90 +1,68 @@
 import os
-import io
 import sys
+import json
 import datetime
-import unicodedata
-import webview
+import re
 import fitz  # PyMuPDF
-from PIL import Image, ImageStat
 import pytesseract
+import subprocess
+from PIL import Image
+import webview
 
-# Importações da biblioteca ReportLab para geração do Laudo PDF
-from reportlab.lib.pagesizes import letter
+# ReportLab para geração de laudos em PDF
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# ---------------------------------------------------------------------------
-# CONFIGURAÇÃO DINÂMICA DO TESSERACT (EMBUTIDO / PORTABLE)
-# ---------------------------------------------------------------------------
-if getattr(sys, 'frozen', False):
-    # Execução compilada (.exe via PyInstaller)
-    base_path = sys._MEIPASS
+# ==============================================================================
+# CONFIGURAÇÃO DE CAMINHOS LOCAIS E PORTÁTEIS
+# ==============================================================================
+def obter_caminho_base():
+    """Retorna o caminho base do projeto, suportando execução direta e PyInstaller."""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = obter_caminho_base()
+
+# Configuração do Tesseract OCR
+TESSERACT_LOCAL = os.path.join(BASE_DIR, "Tesseract-OCR", "tesseract.exe")
+if os.path.exists(TESSERACT_LOCAL):
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_LOCAL
 else:
-    # Execução em modo script (.py)
-    base_path = os.path.dirname(os.path.abspath(__file__))
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-caminho_tesseract = os.path.join(base_path, 'Tesseract-OCR', 'tesseract.exe')
-
-if os.path.exists(caminho_tesseract):
-    pytesseract.pytesseract.tesseract_cmd = caminho_tesseract
-    os.environ['TESSDATA_PREFIX'] = os.path.join(base_path, 'Tesseract-OCR', 'tessdata')
-else:
-    # Fallback para o caminho padrão do sistema no Windows caso a pasta local fale
-    caminho_sistema = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    if os.path.exists(caminho_sistema):
-        pytesseract.pytesseract.tesseract_cmd = caminho_sistema
+# Configuração do ExifTool
+EXIFTOOL_LOCAL = os.path.join(BASE_DIR, "ExifTool", "exiftool.exe")
+if not os.path.exists(EXIFTOOL_LOCAL):
+    EXIFTOOL_LOCAL = "exiftool"
 
 
-def remover_acentos(texto):
-    """Remove acentos e caracteres especiais para facilitar as buscas."""
-    if not texto:
-        return ""
-    nfkd = unicodedata.normalize('NFKD', texto)
-    return "".join([c for c in nfkd if not unicodedata.combining(c)]).upper()
+# ==============================================================================
+# FUNÇÃO AUXILIAR DE SANITIZAÇÃO
+# ==============================================================================
+def limpar_string_metadado(val):
+    """
+    Sanitiza strings de metadados removendo caracteres binários/corrompidos.
+    Exibe apenas caracteres legíveis ASCII/Unicode válidos ou 'N/A'.
+    """
+    if not val or val == "N/A":
+        return "N/A"
+    
+    s = str(val).strip()
+    s_limpa = re.sub(r'[^\x20-\x7E]', '', s).strip()
+    
+    if not s_limpa or len(s_limpa) < 2:
+        return "N/A"
+        
+    return s_limpa
 
 
-# Mapeamento de Regras do MEC por Tipo de Documento
-REGRAS_DOCUMENTOS = {
-    "VACINA_RUBEOLA": {
-        "rotulo": "Comprovante / Carteira de Vacinação de Rubéola",
-        "keywords": ["RUBÉOLA", "RUBEOLA", "VACINA", "VACINACAO", "VACINAÇÃO", "IMUNIZACAO", "IMUNIZAÇÃO", "CARTEIRA DE VACINACAO", "TRÍPLICE VIRAL"],
-        "exige_cor": True
-    },
-    "QUITACAO_ELEITORAL": {
-        "rotulo": "Quitação Eleitoral",
-        "keywords": ["QUITACAO ELEITORAL", "CERTIDAO DE QUITACAO", "JUSTICA ELEITORAL", "TRIBUNAL SUPERIOR ELEITORAL", "QUITACAO"],
-        "exige_cor": False
-    },
-    "IDENTIDADE_RG_CNH": {
-        "rotulo": "Carteira de Identidade / CNH",
-        "keywords": ["CNH", "CNH-E", "HABILITACAO", "CARTEIRA DE IDENTIDADE", "REGISTRO GERAL", "CARTEIRA NACIONAL DE HABILITACAO", "DETRAN", "SSP", "IDENTIDADE"],
-        "exige_cor": True
-    },
-    "CERTIFICADO_DIPLOMA": {
-        "rotulo": "Certificado / Diploma",
-        "keywords": ["CERTIFICADO DE CONCLUSAO", "DIPLOMA", "ENSINO MEDIO", "SECRETARIA DE EDUCACAO", "CERTIFICADO", "CONCLUSAO DE ENSINO"],
-        "exige_cor": True
-    },
-    "HISTORICO_ESCOLAR": {
-        "rotulo": "Histórico Escolar",
-        "keywords": ["HISTORICO ESCOLAR", "COMPONENTES CURRICULARES", "MATRICULA", "HISTORICO"],
-        "exige_cor": False
-    },
-    "CERTIDAO": {
-        "rotulo": "Certidão (Nascimento/Casamento)",
-        "keywords": ["CERTIDAO DE NASCIMENTO", "CERTIDAO DE CASAMENTO", "REGISTRO CIVIL", "NASCIMENTO", "CASAMENTO"],
-        "exige_cor": True
-    },
-    "SERVICO_MILITAR": {
-        "rotulo": "Comprovante Militar",
-        "keywords": ["SERVICO MILITAR", "CERTIFICADO DE RESERVISTA", "MINISTERIO DA DEFESA", "EXERCITO BRASILEIRO", "CAM", "MILITAR", "RESERVISTA"],
-        "exige_cor": False
-    }
-}
-
-
-class ValidadorAPI:
+# ==============================================================================
+# CLASSE DE LÓGICA DA APLICAÇÃO (API PYWEBVIEW)
+# ==============================================================================
+class ApiValidador:
     def __init__(self):
         self._window = None
 
@@ -92,207 +70,179 @@ class ValidadorAPI:
         self._window = window
 
     def selecionar_arquivos(self):
-        """Abre a janela nativa para seleção de PDFs."""
-        result = self._window.create_file_dialog(
-            webview.OPEN_DIALOG, 
-            allow_multiple=True, 
-            file_types=('Arquivos PDF (*.pdf)',)
-        )
-        return result if result else []
-
-    def validar_documentos(self, caminhos, dpi_minimo=300, exigir_pdfa=False):
-        """Método invocado pela interface Web em JavaScript."""
-        resultados = []
-        for caminho in caminhos:
-            res = self.validar_pdf(caminho, dpi_minimo=int(dpi_minimo), exigir_pdfa=exigir_pdfa)
-            resultados.append(res)
-        return resultados
-
-    def _obter_texto_completo(self, doc):
-        """Renderiza a página a 300 DPI para extrair texto via OCR Tesseract e rastrear marcas d'água."""
-        texto_nativo = ""
-        texto_ocr_visual = ""
-        
+        """Abre o diálogo de seleção de ficheiros PDF (compatível com versões novas do pywebview)."""
         try:
-            page = doc[0]
-            # 1. Extrai texto vetorial/nativo da camada do PDF
-            texto_nativo = page.get_text("text") or ""
-            
-            # 2. Renderiza a página em 300 DPI e aplica o OCR visual
-            pix = page.get_pixmap(dpi=300)
-            img = Image.open(io.BytesIO(pix.tobytes()))
+            # Compatibilidade com a versão atual do pywebview (FileDialog)
+            file_type = webview.FileDialog.OPEN if hasattr(webview, 'FileDialog') else webview.OPEN_DIALOG
+            ficheiros = self._window.create_file_dialog(
+                file_type, 
+                allow_multiple=True, 
+                file_types=('Arquivos PDF (*.pdf)',)
+            )
+            return list(ficheiros) if ficheiros else []
+        except Exception as e:
+            print(f"Erro ao abrir janela de arquivos: {str(e)}")
+            return []
+
+    def _extrair_metadados_exiftool(self, caminho_pdf):
+        """Extrai metadados completos do PDF utilizando o ExifTool."""
+        try:
+            cmd = [EXIFTOOL_LOCAL, "-j", caminho_pdf]
+            resultado = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            dados = json.loads(resultado.stdout)
+            if dados and isinstance(dados, list):
+                return dados[0]
+        except Exception as e:
+            print(f"Erro ao ler metadados com ExifTool: {str(e)}")
+        return {}
+
+    def analisar_documentos(self, caminhos, auditar_softwares=False, exigir_pdfa=False, dpi_minimo=300):
+        """Executa a verificação técnica completa em cada ficheiro PDF fornecido."""
+        resultados = []
+
+        softwares_suspeitos = ["PHOTOSHOP", "CANVA", "ILLUSTRATOR", "CORELDRAW", "GIMP", "INKSCAPE"]
+
+        for caminho in caminhos:
+            nome_arquivo = os.path.basename(caminho)
+            erros = []
             
             try:
-                texto_ocr_visual = pytesseract.image_to_string(img, lang='por')
-            except Exception:
-                texto_ocr_visual = pytesseract.image_to_string(img)
-        except Exception as e:
-            print(f"Erro no processamento OCR: {str(e)}")
-
-        return remover_acentos(f"{texto_nativo} {texto_ocr_visual}")
-
-    def _identificar_tipo_documento(self, texto_analise, nome_arquivo):
-        texto_unificado = remover_acentos(texto_analise + " " + nome_arquivo)
-        for chave, regra in REGRAS_DOCUMENTOS.items():
-            if any(kw in texto_unificado for kw in regra["keywords"]):
-                return chave, regra["rotulo"], regra["exige_cor"]
-        return "DESCONHECIDO", "Geral / Desconhecido", False
-
-    def _verificar_pdfa(self, doc):
-        try:
-            xml_data = ""
-            if hasattr(doc, "get_xml_metadata"):
-                xml_data = doc.get_xml_metadata() or ""
-            elif hasattr(doc, "metadata_xmp"):
-                xml_data = doc.metadata_xmp or ""
-            
-            xmp_lower = str(xml_data).lower()
-            if "pdfaid:conformance" in xmp_lower or "pdfaid:part" in xmp_lower:
-                return True
-            
-            meta = doc.metadata or {}
-            for v in meta.values():
-                if v and "pdf/a" in str(v).lower():
-                    return True
-            return False
-        except Exception:
-            return False
-
-    def _checar_variacao_cor(self, img):
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        stat = ImageStat.Stat(img)
-        return abs(stat.var[0] - stat.var[1]) > 10 or abs(stat.var[1] - stat.var[2]) > 10
-
-    def validar_pdf(self, caminho_arquivo, dpi_minimo=300, exigir_pdfa=False):
-        try:
-            doc = fitz.open(caminho_arquivo)
-            nome_arquivo = os.path.basename(caminho_arquivo)
-            
-            total_paginas = len(doc)
-            menor_dpi_encontrado = 9999
-            tem_cor = False
-            erros = []
-
-            # Alerta preventivo se o motor OCR não for localizado
-            if not os.path.exists(pytesseract.pytesseract.tesseract_cmd):
-                erros.append("ERRO DE SISTEMA: Motor Tesseract OCR não encontrado para verificação de marcas d'água.")
-
-            # 1. EXTRAÇÃO UNIFICADA DE TEXTO
-            texto_analise_unificado = self._obter_texto_completo(doc)
-            _, rotulo_doc, exige_cor = self._identificar_tipo_documento(texto_analise_unificado, nome_arquivo)
-
-            # 2. CHECAGEM DE MARCA D'ÁGUA / APLICATIVOS TERCEIROS
-            texto_completo_busca = remover_acentos((texto_analise_unificado + " " + nome_arquivo).upper())
-            padroes_apps = [
-                "CAMSCANNER", "ADOBE SCAN", "TAPSCANNER", "CLEAR SCANNER", 
-                "GENIUS SCAN", "SIMPLE SCANNER", "VFLAT", "OFFICE LENS", 
-                "MICROSOFT LENS", "SCANNED WITH", "DIGITALIZADO COM"
-            ]
-            
-            marcas_detectadas = [app for app in padroes_apps if app in texto_completo_busca]
-            if marcas_detectadas:
-                app_encontrado = ", ".join(set(marcas_detectadas))
-                erros.append(
-                    f"Marca d'água / aplicativo de terceiro detectado ('{app_encontrado}'). "
-                    f"Fundamento Legal: Art. 4º do Decreto nº 10.278/2020."
-                )
-
-            # 3. VERIFICAÇÃO DE PDF/A
-            e_pdfa = self._verificar_pdfa(doc)
-            if exigir_pdfa and not e_pdfa:
-                erros.append("Arquivo não atende ao padrão PDF/A. Fundamento Legal: Art. 5º do Decreto nº 10.278/2020.")
-
-            # 4. CHECAGEM DE RESOLUÇÃO (DPI), ROTAÇÃO E COR
-            for index, page in enumerate(doc):
-                image_list = page.get_images(full=True)
-                texto_pagina = page.get_text("text").strip()
-                page_area = page.rect.width * page.rect.height
+                doc = fitz.open(caminho)
+                total_paginas = len(doc)
                 
-                # Validação de Rotação por OSD
-                try:
-                    pix = page.get_pixmap(dpi=150)
-                    img_pag = Image.open(io.BytesIO(pix.tobytes()))
-                    osd = pytesseract.image_to_osd(img_pag)
-                    for line in osd.split('\n'):
-                        if "Rotate:" in line:
-                            angulo = int(line.split(':')[1].strip())
-                            if angulo != 0:
-                                erros.append(f"Página {index + 1} está rotacionada ({angulo}°). Fundamento Legal: Anexo I do Decreto nº 10.278/2020.")
-                            break
-                except Exception:
-                    pass
+                eh_nato_digital = False
+                dpi_minimo_encontrado = 9999
+                colorido_detectado = False
+                tipo_documento = "Geral / Desconhecido"
+                texto_completo_ocr = ""
 
-                if not image_list:
-                    if len(texto_pagina) > 20:
-                        if 300 < menor_dpi_encontrado:
-                            menor_dpi_encontrado = 300
-                        continue
-                    else:
-                        erros.append(f"Página {index + 1} não contém imagem nem texto legível.")
-                        continue
-
-                for img_info in image_list:
-                    xref = img_info[0]
-                    base_image = doc.extract_image(xref)
-                    img = Image.open(io.BytesIO(base_image["image"]))
-                    width, height = img.size
+                # 1. Análise das páginas
+                for num_pag in range(total_paginas):
+                    pagina = doc[num_pag]
+                    rotacao = pagina.rotation
                     
-                    rects = page.get_image_rects(xref)
-                    if rects:
-                        rect = rects[0]
-                        if page_area > 0 and ((rect.width * rect.height) / page_area) < 0.20:
-                            continue
+                    if rotacao != 0:
+                        erros.append(f"Página {num_pag + 1} está rotacionada ({rotacao}°). Fundamento Legal: Anexo I do Decreto nº 10.278/2020.")
 
-                        w_inches = rect.width / 72.0
-                        h_inches = rect.height / 72.0
-                        dpi_efetivo = round(min(width / w_inches if w_inches > 0 else 0, height / h_inches if h_inches > 0 else 0))
+                    texto_pagina = pagina.get_text()
+                    if texto_pagina and len(texto_pagina.strip()) > 50:
+                        eh_nato_digital = True
+                        texto_completo_ocr += f" {texto_pagina}"
+
+                    lista_imagens = pagina.get_images()
+                    
+                    if not lista_imagens and not eh_nato_digital:
+                        erros.append(f"Página {num_pag + 1} não contém imagem nem texto legível.")
+                        continue
+
+                    for img in lista_imagens:
+                        xref = img[0]
+                        pix = fitz.Pixmap(doc, xref)
                         
-                        if dpi_efetivo < menor_dpi_encontrado:
-                            menor_dpi_encontrado = dpi_efetivo
+                        dpi_x = round((pix.width / pagina.rect.width) * 72) if pagina.rect.width > 0 else 0
+                        dpi_y = round((pix.height / pagina.rect.height) * 72) if pagina.rect.height > 0 else 0
+                        dpi_efetivo = min(dpi_x, dpi_y)
 
-                    if img.mode in ("RGB", "CMYK") and self._checar_variacao_cor(img):
-                        tem_cor = True
+                        if dpi_efetivo < dpi_minimo_encontrado and dpi_efetivo > 0:
+                            dpi_minimo_encontrado = dpi_efetivo
 
-            if menor_dpi_encontrado == 9999:
-                menor_dpi_encontrado = 300 if any(len(p.get_text("text").strip()) > 20 for p in doc) else 0
+                        if pix.colorspace and pix.colorspace.n >= 3:
+                            colorido_detectado = True
 
-            if menor_dpi_encontrado < dpi_minimo:
-                erros.append(f"Resolução insuficiente ({menor_dpi_encontrado} DPI encontrado vs {dpi_minimo} DPI exigido). Fundamento Legal: Anexo I do Decreto nº 10.278/2020.")
+                        if not eh_nato_digital and len(texto_pagina.strip()) <= 50:
+                            try:
+                                img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                texto_ocr = pytesseract.image_to_string(img_pil, lang='por+eng')
+                                texto_completo_ocr += f" {texto_ocr}"
+                            except Exception as err_ocr:
+                                print(f"Aviso no OCR da pág {num_pag + 1}: {str(err_ocr)}")
 
-            tem_texto_nativo = any(len(p.get_text("text").strip()) > 50 for p in doc)
-            if exige_cor and not tem_cor and not tem_texto_nativo:
-                erros.append(f"O documento '{rotulo_doc}' exige captura colorida (RGB). Fundamento Legal: Anexo I do Decreto nº 10.278/2020.")
+                # 2. Resolução DPI utilizando o valor dinâmico passado pela interface
+                dpi_final_str = "Nativo (Vetor)" if eh_nato_digital else str(dpi_minimo_encontrado if dpi_minimo_encontrado != 9999 else "N/A")
+                
+                if not eh_nato_digital and dpi_minimo_encontrado < dpi_minimo:
+                    erros.append(f"Resolução insuficiente ({dpi_minimo_encontrado} DPI encontrado vs {dpi_minimo} DPI exigido). Fundamento Legal: Anexo I do Decreto nº 10.278/2020.")
 
-            return {
-                "nome": nome_arquivo,
-                "caminho": caminho_arquivo,
-                "tipo_doc": rotulo_doc,
-                "dpi": menor_dpi_encontrado if menor_dpi_encontrado > 0 else "N/A",
-                "colorido": tem_cor,
-                "pdfa": e_pdfa,
-                "paginas": total_paginas,
-                "aprovado": len(erros) == 0,
-                "erros": erros
-            }
+                # 3. Classificação por tipo
+                txt_lower = texto_completo_ocr.lower()
+                if "vacina" in txt_lower or "rubéola" in txt_lower or "imunização" in txt_lower:
+                    tipo_documento = "Comprovante / Carteira de Vacinação de Rubéola"
+                elif "historico escolar" in txt_lower or "histórico escolar" in txt_lower:
+                    tipo_documento = "Histórico Escolar"
+                elif "diploma" in txt_lower or "certificado" in txt_lower:
+                    tipo_documento = "Certificado / Diploma"
+                elif "quitação eleitoral" in txt_lower or "quitacao eleitoral" in txt_lower:
+                    tipo_documento = "Quitação Eleitoral"
+                elif "carteira nacional de habilitação" in txt_lower or "cnh" in txt_lower or "identidade" in txt_lower:
+                    tipo_documento = "Carteira de Identidade / CNH"
+                elif "militar" in txt_lower or "reservista" in txt_lower:
+                    tipo_documento = "Comprovante Militar"
 
-        except Exception as e:
-            return {
-                "nome": os.path.basename(caminho_arquivo),
-                "caminho": caminho_arquivo,
-                "tipo_doc": "Erro no processamento",
-                "dpi": 0,
-                "colorido": False,
-                "pdfa": False,
-                "paginas": 0,
-                "aprovado": False,
-                "erros": [f"Erro ao processar arquivo: {str(e)}"]
-            }
+                # 4. Metadados e verificação de PDF/A
+                metadados_exif = self._extrair_metadados_exiftool(caminho)
+                
+                eh_pdfa = False
+                if "pdfa" in str(metadados_exif.get("GTS_PDFAConformance", "")).lower() or \
+                   "pdfa" in str(metadados_exif.get("PDFVersion", "")).lower() or \
+                   metadados_exif.get("pdfaid:part") is not None:
+                    eh_pdfa = True
+
+                if exigir_pdfa and not eh_pdfa:
+                    erros.append("O ficheiro não está no formato preservado PDF/A. Fundamento Legal: Decreto nº 10.278/2020.")
+
+                autor = str(metadados_exif.get("Author", "")).upper()
+                criador = str(metadados_exif.get("Creator", "")).upper()
+                
+                if "CAMSCANNER" in txt_lower or "CAMSCANNER" in autor or "CAMSCANNER" in criador:
+                    erros.append("Marca d'água / aplicativo de terceiro detectado ('CAMSCANNER'). Fundamento Legal: Art. 4º do Decreto nº 10.278/2020.")
+
+                if auditar_softwares:
+                    software_usado = str(metadados_exif.get("Software", "")).upper() or str(metadados_exif.get("Producer", "")).upper()
+                    for sw in softwares_suspeitos:
+                        if sw in software_usado:
+                            erros.append(f"Uso de editor gráfico/software não autorizado detectado ({sw}). Fundamento Legal: Art. 4º do Decreto nº 10.278/2020.")
+
+                doc.close()
+
+                resultados.append({
+                    "nome": nome_arquivo,
+                    "caminho": caminho,
+                    "origem": "Nato-Digital" if eh_nato_digital else "Escaneado",
+                    "tipo_doc": tipo_documento,
+                    "paginas": total_paginas,
+                    "dpi": dpi_final_str,
+                    "pdfa": eh_pdfa,
+                    "colorido": colorido_detectado,
+                    "aprovado": len(erros) == 0,
+                    "erros": erros,
+                    "metadados": {
+                        "meta_completo": metadados_exif
+                    }
+                })
+
+            except Exception as e:
+                resultados.append({
+                    "nome": nome_arquivo,
+                    "caminho": caminho,
+                    "origem": "Erro",
+                    "tipo_doc": "Indefinido",
+                    "paginas": 0,
+                    "dpi": "N/A",
+                    "pdfa": False,
+                    "colorido": False,
+                    "aprovado": False,
+                    "erros": [f"Falha ao processar o ficheiro PDF: {str(e)}"],
+                    "metadados": {}
+                })
+
+        return resultados
 
     def gerar_laudo_pdf(self, resultados):
+        """Gera o laudo oficial em PDF."""
         try:
+            file_type = webview.FileDialog.SAVE if hasattr(webview, 'FileDialog') else webview.SAVE_DIALOG
             local_salvar = self._window.create_file_dialog(
-                webview.SAVE_DIALOG, 
+                file_type, 
                 save_filename="Laudo_Conformidade_MEC.pdf",
                 file_types=('Arquivos PDF (*.pdf)',)
             )
@@ -302,22 +252,30 @@ class ValidadorAPI:
             if isinstance(local_salvar, tuple):
                 local_salvar = local_salvar[0]
 
-            doc = SimpleDocTemplate(local_salvar, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+            doc = SimpleDocTemplate(
+                local_salvar, 
+                pagesize=letter, 
+                rightMargin=28, 
+                leftMargin=28, 
+                topMargin=28, 
+                bottomMargin=28
+            )
             story = []
             styles = getSampleStyleSheet()
 
-            # Paleta de Cores Institucional Unicesusc
             COR_BORDO = colors.HexColor("#4A1525")
             COR_VERMELHO = colors.HexColor("#D33833")
             COR_TEXTO = colors.HexColor("#2D3748")
-            COR_FUNDO_ALT = colors.HexColor("#F9F5F6")
+            COR_FUNDO_ALT = colors.HexColor("#F8FAFC")
 
-            title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=COR_BORDO, spaceAfter=6)
-            sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=9, textColor=COR_TEXTO, spaceAfter=12)
-            cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=COR_TEXTO)
-            cell_bold = ParagraphStyle('CellBold', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold", textColor=COR_TEXTO)
-            cell_header = ParagraphStyle('CellHeader', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold", textColor=colors.white)
-            error_style = ParagraphStyle('ErrorStyle', parent=styles['Normal'], fontSize=8, leading=10, textColor=COR_VERMELHO)
+            title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=14, textColor=COR_BORDO, spaceAfter=2)
+            sub_title = ParagraphStyle('SubTitle', parent=styles['Heading2'], fontSize=11, textColor=COR_BORDO, spaceBefore=10, spaceAfter=6)
+            sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=8, textColor=COR_TEXTO, spaceAfter=8)
+            
+            cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=7.5, leading=9.5, textColor=COR_TEXTO)
+            cell_bold = ParagraphStyle('CellBold', parent=styles['Normal'], fontSize=7.5, leading=9.5, fontName="Helvetica-Bold", textColor=COR_TEXTO)
+            cell_header = ParagraphStyle('CellHeader', parent=styles['Normal'], fontSize=7.5, leading=9.5, fontName="Helvetica-Bold", textColor=colors.white)
+            error_style = ParagraphStyle('ErrorStyle', parent=styles['Normal'], fontSize=7.5, leading=9.5, textColor=COR_VERMELHO)
 
             data_hora = datetime.datetime.now().strftime("%d/%m/%Y às %H:%M:%S")
             story.append(Paragraph("LAUDO TÉCNICO DE CONFORMIDADE REGULATÓRIA - MEC", title_style))
@@ -336,13 +294,13 @@ class ValidadorAPI:
                 ('BACKGROUND', (0, 0), (-1, 0), COR_FUNDO_ALT),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e0')),
-                ('PADDING', (0, 0), (-1, -1), 6),
+                ('PADDING', (0, 0), (-1, -1), 4),
             ]))
             story.append(t_summary)
-            story.append(Spacer(1, 12))
+            story.append(Spacer(1, 8))
 
             table_data = [[
-                Paragraph("Documento / Tipo", cell_header),
+                Paragraph("Documento / Origem", cell_header),
                 Paragraph("DPI", cell_header),
                 Paragraph("Cor", cell_header),
                 Paragraph("Resultado", cell_header),
@@ -356,7 +314,7 @@ class ValidadorAPI:
                 if r['erros']:
                     detalhe_parecer = "<br/>".join([f"• {e}" for e in r['erros']])
 
-                doc_info = f"<b>{r['nome']}</b><br/><font color='#718096'>Tipo: {r['tipo_doc']}</font>"
+                doc_info = f"<b>{r['nome']}</b><br/><font color='#64748B'>{r['origem']} • {r['tipo_doc']}</font>"
 
                 table_data.append([
                     Paragraph(doc_info, cell_style),
@@ -366,25 +324,73 @@ class ValidadorAPI:
                     Paragraph(detalhe_parecer, error_style if not r['aprovado'] else cell_style)
                 ])
 
-            t_details = Table(table_data, colWidths=[130, 40, 55, 65, 250])
-            
-            # Estilização da Tabela do Laudo com a paleta Unicesusc
+            t_details = Table(table_data, colWidths=[140, 40, 50, 66, 260])
             estilo_tabela = [
                 ('BACKGROUND', (0, 0), (-1, 0), COR_BORDO),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('PADDING', (0, 0), (-1, -1), 5),
+                ('PADDING', (0, 0), (-1, -1), 4),
                 ('ALIGN', (1, 1), (2, -1), 'CENTER'),
                 ('ALIGN', (3, 1), (3, -1), 'CENTER'),
             ]
 
-            # Fundo alternado suave nas linhas da tabela
             for i in range(1, len(table_data)):
                 if i % 2 == 0:
                     estilo_tabela.append(('BACKGROUND', (0, i), (-1, i), COR_FUNDO_ALT))
 
             t_details.setStyle(TableStyle(estilo_tabela))
             story.append(t_details)
+
+            story.append(Spacer(1, 12))
+            story.append(Paragraph("Anexo: Ficha Técnica de Metadados Completos (ExifTool)", sub_title))
+
+            for r in resultados:
+                if r.get("metadados") and r["metadados"].get("meta_completo"):
+                    meta = r["metadados"]["meta_completo"]
+                    
+                    rows_meta = [
+                        [
+                            Paragraph("Tag de Metadado", cell_header), 
+                            Paragraph("Valor Registrado no Cabeçalho do PDF", cell_header)
+                        ],
+                        [
+                            Paragraph("Software / Gerador", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("Software") or meta.get("Producer") or meta.get("Creator")), cell_style)
+                        ],
+                        [
+                            Paragraph("Data de Criação", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("CreateDate")), cell_style)
+                        ],
+                        [
+                            Paragraph("Data de Modificação", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("ModifyDate")), cell_style)
+                        ],
+                        [
+                            Paragraph("Versão do PDF", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("PDFVersion")), cell_style)
+                        ],
+                        [
+                            Paragraph("Autor / Usuário", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("Author")), cell_style)
+                        ],
+                        [
+                            Paragraph("Criptografia / Proteção", cell_bold), 
+                            Paragraph(limpar_string_metadado(meta.get("Encryption") or "Nenhuma"), cell_style)
+                        ],
+                    ]
+
+                    story.append(Spacer(1, 4))
+                    story.append(Paragraph(f"<b>Arquivo: {r['nome']}</b>", cell_style))
+                    story.append(Spacer(1, 2))
+                    
+                    t_meta = Table(rows_meta, colWidths=[150, 406])
+                    t_meta.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), COR_BORDO),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('PADDING', (0, 0), (-1, -1), 3),
+                    ]))
+                    story.append(t_meta)
 
             doc.build(story)
             return True
@@ -393,27 +399,20 @@ class ValidadorAPI:
             return False
 
 
-def obter_caminho_html():
-    if getattr(sys, 'frozen', False):
-        return os.path.join(sys._MEIPASS, 'index.html')
-    return os.path.abspath('index.html')
-
-
-def iniciar_app():
-    api = ValidadorAPI()
-    html_path = obter_caminho_html()
+# ==============================================================================
+# PONTO DE ENTRADA E INICIALIZAÇÃO DA INTERFACE
+# ==============================================================================
+if __name__ == '__main__':
+    api = ApiValidador()
+    caminho_html = os.path.join(BASE_DIR, 'index.html')
 
     window = webview.create_window(
-        title='Validador de Documentos MEC',
-        url=f'file:///{html_path}' if os.path.isabs(html_path) else html_path,
+        'Validador de Conformidade MEC - Decreto 10.278/2020',
+        url=caminho_html,
         js_api=api,
-        width=1120,
-        height=820,
+        width=1100,
+        height=750,
         resizable=True
     )
     api.set_window(window)
     webview.start(debug=False)
-
-
-if __name__ == '__main__':
-    iniciar_app()

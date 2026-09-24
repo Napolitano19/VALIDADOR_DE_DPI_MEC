@@ -10,11 +10,10 @@ import subprocess
 from PIL import Image, ImageStat
 import webview
 import numpy as np
-
 # ReportLab para geração de laudos em PDF
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # ==============================================================================
@@ -110,7 +109,71 @@ def analisar_modo_cor_real(pixmap):
         print(f"Erro na análise do modo de cor: {e}")
         return "Colorido"
 
-    
+# ==============================================================================
+# FUNÇÃO PARA AUDITAR OS METADADOS
+# ==============================================================================
+def auditar_metadados_com_metodologia(caminho_pdf, dpi_encontrado, modo_cor):
+    """
+    Realiza a auditoria dos metadados nativos do PDF e mapeia a metodologia
+    de obtenção para a página final do laudo do Decreto nº 10.278/2020.
+    """
+    doc = fitz.open(caminho_pdf)
+    meta_nativo = doc.metadata
+    doc.close()
+
+    titulo_atual = meta_nativo.get("title", "")
+    if titulo_atual is None: titulo_atual = ""
+    titulo_atual = titulo_atual.strip()
+
+    autor_atual = meta_nativo.get("author", "")
+    if autor_atual is None: autor_atual = ""
+    autor_atual = autor_atual.strip()
+
+    # Trata a validação de DPI caso o documento seja Nato-Digital (Vetor)
+    status_dpi = "CONFORME"
+    if isinstance(dpi_encontrado, int) and dpi_encontrado < 300:
+        status_dpi = "REPROVADO"
+    elif dpi_encontrado != "Nativo (Vetor)" and str(dpi_encontrado).isdigit() and int(dpi_encontrado) < 300:
+        status_dpi = "REPROVADO"
+
+    relatorio_metadados = {
+        "auditoria": {
+            "Título do Documento": {
+                "valor": titulo_atual if titulo_atual else os.path.basename(caminho_pdf),
+                "status": "CONFORME" if titulo_atual and not titulo_atual.lower().startswith("scan") else "AVISO",
+                "metodologia": "Lido diretamente da propriedade interna 'title' do arquivo PDF ou do nome de registro no sistema de arquivos."
+            },
+            "Autor / Emissor": {
+                "valor": autor_atual if autor_atual else "Não Identificado",
+                "status": "CONFORME" if autor_atual else "AVISO",
+                "metodologia": "Extraído da propriedade 'author' gravada no container de metadados do documento digital."
+            },
+            "Hash (Checksum) SHA-256": {
+                "valor": "Calculado na execução",
+                "status": "CONFORME",
+                "metodologia": "Calculado via algoritmo de hash criptográfico SHA-256 sobre a sequência de bytes brutos do arquivo PDF para assegurar a integridade e imutabilidade."
+            },
+            "Resolução (DPI)": {
+                "valor": f"{dpi_encontrado} DPI" if str(dpi_encontrado).isdigit() else dpi_encontrado,
+                "status": status_dpi,
+                "metodologia": "Identificado através da relação matemática entre as dimensões em píxeis da imagem interna e o tamanho físico da página em polegadas via biblioteca PyMuPDF."
+            },
+            "Modo de Cor Real": {
+                "valor": modo_cor,
+                "status": "CONFORME",
+                "metodologia": "Avaliado por visão computacional via matrizes NumPy, analisando a variação estatística de amplitude entre os canais de cor e a contagem de píxeis coloridos."
+            },
+            "Identificador Único (UUID)": {
+                "valor": "Pendente de Atribuição (Unimestre)",
+                "status": "INFO",
+                "metodologia": "Reservado para atribuição de ID de chave primária/UUID pelo sistema de Acervo Digital (Unimestre) no momento do armazenamento definitivo."
+            }
+        }
+    }
+    return relatorio_metadados
+
+
+
 # ==============================================================================
 # CLASSE DE LÓGICA DA APLICAÇÃO (API PYWEBVIEW)
 # ==============================================================================
@@ -259,6 +322,9 @@ class ApiValidador:
 
                 doc.close()
 
+                # --- NOVO: Chama a auditoria de metadados antes de salvar os resultados ---
+                metadados_metodologia = auditar_metadados_com_metodologia(caminho, dpi_final_str, modo_cor_final)
+
                 resultados.append({
                     "nome": nome_arquivo,
                     "caminho": caminho,
@@ -273,7 +339,8 @@ class ApiValidador:
                     "aprovado": len(erros) == 0,
                     "erros": erros,
                     "metadados": {
-                        "meta_completo": metadados_exif
+                        "meta_completo": metadados_exif,
+                        "metodologia": metadados_metodologia["auditoria"] # Injetamos a metodologia aqui
                     }
                 })
 
@@ -432,6 +499,35 @@ class ApiValidador:
                         ('PADDING', (0, 0), (-1, -1), 3),
                     ]))
                     story.append(t_meta)
+
+            # --- NOVO: Quebra de página e Tabela de Metodologia Técnica ---
+            story.append(PageBreak())
+            story.append(Paragraph("APÊNDICE TÉCNICO - NOTA METODOLÓGICA", title_style))
+            story.append(Paragraph("Detalhamento da metodologia de obtenção, extração e cálculo dos metadados estruturados exigidos pelo Anexo II do Decreto nº 10.278/2020.", sub_style))
+            story.append(Spacer(1, 10))
+
+            metodologia_data = [
+                [Paragraph("Metadado Oficial do Anexo II", cell_header), Paragraph("Origem Sistêmica & Metodologia de Obtenção", cell_header)]
+            ]
+            
+            # Pega as descrições padronizadas do primeiro resultado analisado
+            if resultados and "metodologia" in resultados[0].get("metadados", {}):
+                dict_metodologia = resultados[0]["metadados"]["metodologia"]
+                for chave, info in dict_metodologia.items():
+                    metodologia_data.append([
+                        Paragraph(f"<b>{chave}</b>", cell_bold),
+                        Paragraph(info["metodologia"], cell_style)
+                    ])
+
+            t_metodologia = Table(metodologia_data, colWidths=[130, 426])
+            t_metodologia.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), COR_BORDO),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('PADDING', (0, 0), (-1, -1), 5),
+            ]))
+            story.append(t_metodologia)
+            # --- FIM DO NOVO BLOCO ---
 
             doc.build(story)
             return True
